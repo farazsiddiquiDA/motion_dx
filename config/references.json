@@ -1,0 +1,47 @@
+{
+  "system": {
+    "name": "MOTION DX",
+    "version": "1.0.0",
+    "tagline": "Objective movement measurement using computer vision.",
+    "clinical_safety_notice": "MOTION DX provides movement measurements and kinematics observations for clinical review and research. It does NOT make medical diagnoses or replace clinical judgement."
+  },
+  "joints": {
+    "knee": {
+      "display_name": "Knee Range of Motion",
+      "landmarks": ["HIP", "KNEE", "ANKLE"],
+      "primary_angle": "flexion_extension",
+      "literature_reference_note": "Literature values for adult active knee flexion typically range ~130°-145°, extension ~0°. Actual functional ROM varies by age, sex, and individual anatomy. Displayed solely for clinical reference.",
+      "nominal_typical_rom": [0, 140]
+    },
+    "elbow": {
+      "display_name": "Elbow Range of Motion",
+      "landmarks": ["SHOULDER", "ELBOW", "WRIST"],
+      "primary_angle": "flexion_extension",
+      "literature_reference_note": "Literature values for adult active elbow flexion typically range ~140°-150°, extension ~0°. Displayed solely for clinical reference.",
+      "nominal_typical_rom": [0, 145]
+    },
+    "shoulder": {
+      "display_name": "Shoulder Abduction / Flexion",
+      "landmarks": ["HIP", "SHOULDER", "ELBOW"],
+      "primary_angle": "abduction_elevation",
+      "literature_reference_note": "Literature values for shoulder abduction / elevation typically range up to 160°-180°. Displayed solely for clinical reference.",
+      "nominal_typical_rom": [0, 160]
+    }
+  },
+  "tmd": {
+    "display_name": "Temporomandibular & Jaw Kinematics",
+    "steps": [
+      {"id": 1, "name": "Neutral Baseline", "prompt": "Relax face in neutral posture. Calibrates midline and resting aperture."},
+      {"id": 2, "name": "Maximum Opening", "prompt": "Slowly open mouth to comfortable maximum active opening."},
+      {"id": 3, "name": "Closing Return", "prompt": "Close mouth smoothly back to resting dental contact."},
+      {"id": 4, "name": "Left Lateral Excursion", "prompt": "Move lower jaw gently to the subject's left side."},
+      {"id": 5, "name": "Right Lateral Excursion", "prompt": "Move lower jaw gently to the subject's right side."}
+    ],
+    "literature_reference_note": "Adult active maximum incisal opening typically spans ~35-55 mm in clinical literature, lateral movement ~7-10 mm. Observations reflect physical landmark displacement."
+  },
+  "gait": {
+    "display_name": "Basic Lower-Limb Gait Observation",
+    "tracked_joints": ["Left Hip", "Left Knee", "Left Ankle", "Right Hip", "Right Knee", "Right Ankle"],
+    "literature_reference_note": "Observation of bilateral lower-limb sagittal kinematics, step frequency, and bilateral swing symmetry. Descriptive kinematic data only."
+  }
+}
