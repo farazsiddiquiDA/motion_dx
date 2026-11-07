@@ -1,8 +1,17 @@
 
 """
 MOTION DX - Live Clinical Assessment View
-Browser Webcam Edition
-Uses Streamlit WebRTC + existing MediaPipe trackers.
+Browser Webcam + WebRTC Edition
+
+Features:
+- Browser webcam through WebRTC
+- STUN server configuration
+- Limb ROM assessment
+- TMD face tracking
+- Basic gait tracking
+- Start / Stop / Reset
+- TMD step navigation
+- Existing MediaPipe processing pipeline
 """
 
 import time
@@ -54,66 +63,65 @@ def _initialize_controllers(session):
 
 
 # ================================================================
-# BROWSER VIDEO PROCESSING
+# WEBRTC CONFIGURATION
 # ================================================================
 
-@st.fragment(run_every=0.15)
-def _process_browser_frames(
-    ctx,
+RTC_CONFIGURATION = {
+    "iceServers": [
+        {
+            "urls": [
+                "stun:stun.l.google.com:19302"
+            ]
+        }
+    ]
+}
+
+
+# ================================================================
+# BROWSER CAMERA
+# ================================================================
+
+def _create_browser_camera():
+
+    return webrtc_streamer(
+        key="motion-dx-browser-camera",
+
+        mode=WebRtcMode.SENDONLY,
+
+        rtc_configuration=RTC_CONFIGURATION,
+
+        media_stream_constraints={
+            "video": {
+                "width": {"ideal": 640},
+                "height": {"ideal": 480},
+                "frameRate": {"ideal": 30},
+            },
+            "audio": False,
+        },
+
+        async_processing=True,
+    )
+
+
+# ================================================================
+# FRAME PROCESSING
+# ================================================================
+
+def _process_frame(
+    frame_bgr,
     pose_tracker,
     face_tracker,
     session,
-    video_placeholder,
-    telemetry_placeholder,
 ):
     """
-    Reads browser webcam frames through WebRTC.
+    Process one browser webcam frame.
 
-    Processing happens in the Streamlit script thread,
-    not inside the WebRTC video callback.
+    Browser frames are BGR and are adapted to the
+    existing CameraFrame interface.
+
+    No depth information is available.
     """
 
-    if not ctx.state.playing:
-
-        video_placeholder.info(
-            "Waiting for browser webcam connection. "
-            "Allow camera permission in your browser."
-        )
-        return
-
-    if ctx.video_receiver is None:
-
-        video_placeholder.info(
-            "Connecting to browser webcam..."
-        )
-        return
-
-    try:
-        frames = ctx.video_receiver.get_frames(timeout=0.1)
-
-    except queue.Empty:
-        return
-
-    except Exception as exc:
-        video_placeholder.warning(
-            f"Waiting for video frames: {exc}"
-        )
-        return
-
-    if not frames:
-        return
-
-    # Process the newest available frame.
-    video_frame = frames[-1]
-
-    frame_bgr = video_frame.to_ndarray(
-        format="bgr24"
-    )
-
-    if frame_bgr is None:
-        return
-
-    # Convert browser frame to existing MOTION DX format.
     camera_frame = CameraFrame(
         color=frame_bgr,
         depth=None,
@@ -126,9 +134,9 @@ def _process_browser_frames(
         intrinsics=None,
     )
 
-    # ============================================================
+    # ------------------------------------------------------------
     # TMD
-    # ============================================================
+    # ------------------------------------------------------------
 
     if session.assessment_type == "TMD":
 
@@ -154,23 +162,13 @@ def _process_browser_frames(
             cv2.COLOR_BGR2RGB,
         )
 
-        video_placeholder.image(
-            rgb,
-            caption="MOTION DX — Browser Webcam / TMD",
-            use_container_width=True,
-        )
+        return rgb, telemetry, current_step
 
-        with telemetry_placeholder.container():
-            _render_tmd_telemetry_native(
-                telemetry,
-                current_step,
-            )
-
-    # ============================================================
+    # ------------------------------------------------------------
     # GAIT
-    # ============================================================
+    # ------------------------------------------------------------
 
-    elif session.assessment_type == "GAIT":
+    if session.assessment_type == "GAIT":
 
         controller = st.session_state.gait_controller
 
@@ -194,50 +192,287 @@ def _process_browser_frames(
             cv2.COLOR_BGR2RGB,
         )
 
-        video_placeholder.image(
-            rgb,
-            caption="MOTION DX — Browser Webcam / Gait",
-            use_container_width=True,
-        )
+        return rgb, telemetry, None
 
-        with telemetry_placeholder.container():
-            _render_gait_telemetry_native(telemetry)
-
-    # ============================================================
+    # ------------------------------------------------------------
     # LIMB ROM
-    # ============================================================
+    # ------------------------------------------------------------
+
+    controller = st.session_state.limb_controller
+
+    pose_result = pose_tracker.process_frame(
+        camera_frame,
+        camera_backend=None,
+    )
+
+    telemetry = controller.update(pose_result)
+
+    rendered = render_pose_skeleton(
+        camera_frame.color,
+        pose_result,
+        highlight_joints=telemetry.get(
+            "highlight_joints"
+        ),
+    )
+
+    rgb = cv2.cvtColor(
+        rendered,
+        cv2.COLOR_BGR2RGB,
+    )
+
+    return rgb, telemetry, None
+
+
+# ================================================================
+# TELEMETRY RENDERING
+# ================================================================
+
+def _render_tmd_telemetry_native(
+    telemetry: Dict[str, Any],
+    current_step: Dict[str, Any],
+):
+
+    quality = telemetry.get("tracking_quality", "POOR")
+
+    opening = telemetry.get("current_opening", 0.0)
+    peak = telemetry.get("peak_opening", 0.0)
+
+    max_left = telemetry.get("max_left_excursion", 0.0)
+    max_right = telemetry.get("max_right_excursion", 0.0)
+
+    symmetry = telemetry.get("lateral_symmetry_index", 100.0)
+
+    unit = telemetry.get("unit", "px")
+
+    st.subheader("Jaw / TMD Kinematics")
+
+    st.caption(
+        f"Step {current_step['step_id']} — "
+        f"{current_step['name']}"
+    )
+
+    _render_tracking_quality(quality)
+
+    c1, c2 = st.columns(2)
+
+    with c1:
+        st.metric("Current Aperture", f"{opening} {unit}")
+
+    with c2:
+        st.metric("Peak Opening", f"{peak} {unit}")
+
+    st.markdown("### Lateral Excursion")
+
+    c1, c2 = st.columns(2)
+
+    with c1:
+        st.metric("Maximum Left", f"{max_left} {unit}")
+
+    with c2:
+        st.metric("Maximum Right", f"{max_right} {unit}")
+
+    st.metric("Lateral Symmetry", f"{symmetry}%")
+
+
+def _render_limb_telemetry_native(
+    telemetry: Dict[str, Any],
+    session: AssessmentSession,
+):
+
+    quality = telemetry.get("tracking_quality", "POOR")
+
+    current = telemetry.get("current_angle", 0.0)
+    minimum = telemetry.get("min_angle", 0.0)
+    maximum = telemetry.get("max_angle", 0.0)
+    rom = telemetry.get("observed_rom", 0.0)
+
+    contra = telemetry.get("contralateral_angle", 0.0)
+    mode = telemetry.get("mode", "2D")
+
+    st.subheader(
+        f"{session.target_joint} Range of Motion"
+    )
+
+    st.caption(
+        f"Mode: {mode} | Side: {session.target_side}"
+    )
+
+    _render_tracking_quality(quality)
+
+    st.metric(
+        "Current Joint Angle",
+        f"{current}°",
+    )
+
+    c1, c2 = st.columns(2)
+
+    with c1:
+        st.metric("Minimum", f"{minimum}°")
+
+    with c2:
+        st.metric("Maximum", f"{maximum}°")
+
+    st.metric(
+        "Observed Active ROM",
+        f"{rom}°",
+    )
+
+    if contra > 0:
+        st.metric("Contralateral Angle", f"{contra}°")
+    else:
+        st.caption("Contralateral: Standby")
+
+
+def _render_gait_telemetry_native(
+    telemetry: Dict[str, Any],
+):
+
+    quality = telemetry.get("tracking_quality", "POOR")
+
+    left_knee = telemetry.get("left_knee_angle", 0.0)
+    right_knee = telemetry.get("right_knee_angle", 0.0)
+
+    steps = telemetry.get("step_count_estimate", 0)
+    duration = telemetry.get("session_duration", 0.0)
+
+    st.subheader("Basic Gait Observation")
+
+    st.caption("Descriptive lower-limb kinematics")
+
+    _render_tracking_quality(quality)
+
+    c1, c2 = st.columns(2)
+
+    with c1:
+        st.metric("Left Knee", f"{left_knee}°")
+
+    with c2:
+        st.metric("Right Knee", f"{right_knee}°")
+
+    c1, c2 = st.columns(2)
+
+    with c1:
+        st.metric("Step Cycles", steps)
+
+    with c2:
+        st.metric("Duration", f"{duration:.1f}s")
+
+
+def _render_tracking_quality(quality):
+
+    quality = str(quality).upper()
+
+    if quality == "GOOD":
+        st.success(f"Tracking: {quality}")
+
+    elif quality == "FAIR":
+        st.warning(f"Tracking: {quality}")
 
     else:
+        st.error(f"Tracking: {quality}")
 
-        controller = st.session_state.limb_controller
 
-        pose_result = pose_tracker.process_frame(
-            camera_frame,
-            camera_backend=None,
+# ================================================================
+# BROWSER FRAME CONSUMER
+# ================================================================
+
+@st.fragment(run_every=0.15)
+def _live_browser_assessment(
+    ctx,
+    pose_tracker,
+    face_tracker,
+    session,
+    video_placeholder,
+    telemetry_placeholder,
+):
+
+    if not ctx.state.playing:
+
+        video_placeholder.info(
+            "Browser camera is not connected. "
+            "Start the webcam and allow camera permission."
         )
 
-        telemetry = controller.update(pose_result)
+        return
 
-        rendered = render_pose_skeleton(
-            camera_frame.color,
-            pose_result,
-            highlight_joints=telemetry.get(
-                "highlight_joints"
-            ),
+    if ctx.video_receiver is None:
+
+        video_placeholder.info(
+            "Waiting for incoming browser video frames..."
         )
 
-        rgb = cv2.cvtColor(
-            rendered,
-            cv2.COLOR_BGR2RGB,
+        return
+
+    try:
+
+        frames = ctx.video_receiver.get_frames(
+            timeout=0.1
         )
 
-        video_placeholder.image(
-            rgb,
-            caption="MOTION DX — Browser Webcam / Live Kinematics",
-            use_container_width=True,
+    except queue.Empty:
+        return
+
+    except Exception as exc:
+
+        video_placeholder.warning(
+            f"Video receiver error: {exc}"
         )
 
-        with telemetry_placeholder.container():
+        return
+
+    if not frames:
+        return
+
+    # Use the latest available frame.
+    latest_frame = frames[-1]
+
+    frame_bgr = latest_frame.to_ndarray(
+        format="bgr24"
+    )
+
+    if frame_bgr is None:
+        return
+
+    try:
+
+        rgb, telemetry, current_step = _process_frame(
+            frame_bgr,
+            pose_tracker,
+            face_tracker,
+            session,
+        )
+
+    except Exception as exc:
+
+        video_placeholder.error(
+            f"Frame processing error: {exc}"
+        )
+
+        return
+
+    video_placeholder.image(
+        rgb,
+        caption="MOTION DX — Browser Webcam / Live Assessment",
+        use_container_width=True,
+    )
+
+    with telemetry_placeholder.container():
+
+        if session.assessment_type == "TMD":
+
+            _render_tmd_telemetry_native(
+                telemetry,
+                current_step,
+            )
+
+        elif session.assessment_type == "GAIT":
+
+            _render_gait_telemetry_native(
+                telemetry
+            )
+
+        else:
+
             _render_limb_telemetry_native(
                 telemetry,
                 session,
@@ -257,6 +492,10 @@ def render_live_assessment_view(
 
     _initialize_controllers(session)
 
+    # ============================================================
+    # HEADER
+    # ============================================================
+
     st.subheader("Clinical Assessment")
 
     col1, col2, col3, col4 = st.columns(4)
@@ -267,7 +506,9 @@ def render_live_assessment_view(
 
     with col2:
         st.write("**Assessment**")
-        st.write(session.assessment_type.replace("_", " "))
+        st.write(
+            session.assessment_type.replace("_", " ")
+        )
 
     with col3:
         st.write("**Target**")
@@ -290,6 +531,7 @@ def render_live_assessment_view(
     col_start, col_stop, col_reset = st.columns(3)
 
     with col_start:
+
         start_btn = st.button(
             "▶ START",
             type="primary",
@@ -299,6 +541,7 @@ def render_live_assessment_view(
         )
 
     with col_stop:
+
         stop_btn = st.button(
             "■ STOP",
             use_container_width=True,
@@ -307,6 +550,7 @@ def render_live_assessment_view(
         )
 
     with col_reset:
+
         reset_btn = st.button(
             "↻ RESET",
             use_container_width=True,
@@ -322,13 +566,22 @@ def render_live_assessment_view(
         session.state = AssessmentState.ACTIVE
 
         if session.assessment_type == "TMD":
-            st.session_state.tmd_controller.start_session(session)
+
+            st.session_state.tmd_controller.start_session(
+                session
+            )
 
         elif session.assessment_type == "GAIT":
-            st.session_state.gait_controller.start_session(session)
+
+            st.session_state.gait_controller.start_session(
+                session
+            )
 
         else:
-            st.session_state.limb_controller.start_session(session)
+
+            st.session_state.limb_controller.start_session(
+                session
+            )
 
         st.rerun()
 
@@ -339,18 +592,22 @@ def render_live_assessment_view(
     if reset_btn:
 
         if session.assessment_type == "TMD":
+
             st.session_state.tmd_controller = TMDAssessment()
 
         elif session.assessment_type == "GAIT":
+
             st.session_state.gait_controller = BasicGaitAssessment()
 
         else:
+
             st.session_state.limb_controller = LimbROMAssessment(
                 joint=session.target_joint,
                 primary_side=session.target_side,
             )
 
         session.state = AssessmentState.READY
+
         st.rerun()
 
     # ============================================================
@@ -360,50 +617,51 @@ def render_live_assessment_view(
     if stop_btn:
 
         if session.assessment_type == "TMD":
-            completed = st.session_state.tmd_controller.stop_session()
+
+            completed = (
+                st.session_state.tmd_controller.stop_session()
+            )
 
         elif session.assessment_type == "GAIT":
-            completed = st.session_state.gait_controller.stop_session()
+
+            completed = (
+                st.session_state.gait_controller.stop_session()
+            )
 
         else:
-            completed = st.session_state.limb_controller.stop_session()
+
+            completed = (
+                st.session_state.limb_controller.stop_session()
+            )
 
         session.state = AssessmentState.COMPLETED
 
         return completed
 
     # ============================================================
-    # CAMERA INTERFACE
+    # WAITING STATE
     # ============================================================
 
     if session.state != AssessmentState.ACTIVE:
 
         st.info(
-            "Press START to begin the assessment."
+            "Press START to begin the live assessment."
         )
 
         return None
 
-    st.markdown("### Browser Camera")
+    # ============================================================
+    # BROWSER CAMERA
+    # ============================================================
+
+    st.markdown("### Browser Webcam")
 
     st.caption(
-        "Allow camera access when your browser requests permission. "
-        "Position your body clearly inside the camera frame."
+        "Allow webcam permission when your browser requests it. "
+        "Keep the required body region visible."
     )
 
-    ctx = webrtc_streamer(
-        key="motion-dx-browser-camera",
-        mode=WebRtcMode.SENDONLY,
-        media_stream_constraints={
-            "video": {
-                "width": {"ideal": 640},
-                "height": {"ideal": 480},
-                "frameRate": {"ideal": 30},
-            },
-            "audio": False,
-        },
-        async_processing=True,
-    )
+    ctx = _create_browser_camera()
 
     video_col, telemetry_col = st.columns([1.55, 1.0])
 
@@ -444,6 +702,7 @@ def render_live_assessment_view(
             ):
 
                 controller.previous_step()
+
                 st.rerun()
 
         with next_col:
@@ -456,13 +715,14 @@ def render_live_assessment_view(
             ):
 
                 controller.next_step()
+
                 st.rerun()
 
     # ============================================================
-    # PROCESS VIDEO
+    # LIVE PROCESSING
     # ============================================================
 
-    _process_browser_frames(
+    _live_browser_assessment(
         ctx,
         pose_tracker,
         face_tracker,
@@ -472,147 +732,3 @@ def render_live_assessment_view(
     )
 
     return None
-
-
-# ================================================================
-# TMD TELEMETRY
-# ================================================================
-
-def _render_tmd_telemetry_native(
-    telemetry: Dict[str, Any],
-    current_step: Dict[str, Any],
-):
-
-    quality = telemetry.get("tracking_quality", "POOR")
-
-    opening = telemetry.get("current_opening", 0.0)
-    peak = telemetry.get("peak_opening", 0.0)
-    max_left = telemetry.get("max_left_excursion", 0.0)
-    max_right = telemetry.get("max_right_excursion", 0.0)
-    symmetry = telemetry.get("lateral_symmetry_index", 100.0)
-    unit = telemetry.get("unit", "px")
-
-    st.subheader("Jaw / TMD Kinematics")
-
-    st.caption(
-        f"Step {current_step['step_id']} — {current_step['name']}"
-    )
-
-    if quality.upper() == "GOOD":
-        st.success(f"Tracking: {quality}")
-    elif quality.upper() == "FAIR":
-        st.warning(f"Tracking: {quality}")
-    else:
-        st.error(f"Tracking: {quality}")
-
-    c1, c2 = st.columns(2)
-
-    with c1:
-        st.metric("Current Aperture", f"{opening} {unit}")
-
-    with c2:
-        st.metric("Peak Opening", f"{peak} {unit}")
-
-    st.markdown("### Lateral Excursion")
-
-    c1, c2 = st.columns(2)
-
-    with c1:
-        st.metric("Maximum Left", f"{max_left} {unit}")
-
-    with c2:
-        st.metric("Maximum Right", f"{max_right} {unit}")
-
-    st.metric("Lateral Symmetry", f"{symmetry}%")
-
-
-# ================================================================
-# LIMB TELEMETRY
-# ================================================================
-
-def _render_limb_telemetry_native(
-    telemetry: Dict[str, Any],
-    session: AssessmentSession,
-):
-
-    quality = telemetry.get("tracking_quality", "POOR")
-
-    current = telemetry.get("current_angle", 0.0)
-    minimum = telemetry.get("min_angle", 0.0)
-    maximum = telemetry.get("max_angle", 0.0)
-    rom = telemetry.get("observed_rom", 0.0)
-    contra = telemetry.get("contralateral_angle", 0.0)
-    mode = telemetry.get("mode", "2D")
-
-    st.subheader(f"{session.target_joint} Range of Motion")
-
-    st.caption(
-        f"Mode: {mode} | Side: {session.target_side}"
-    )
-
-    if quality.upper() == "GOOD":
-        st.success(f"Tracking: {quality}")
-    elif quality.upper() == "FAIR":
-        st.warning(f"Tracking: {quality}")
-    else:
-        st.error(f"Tracking: {quality}")
-
-    st.metric("Current Joint Angle", f"{current}°")
-
-    c1, c2 = st.columns(2)
-
-    with c1:
-        st.metric("Minimum", f"{minimum}°")
-
-    with c2:
-        st.metric("Maximum", f"{maximum}°")
-
-    st.metric("Observed Active ROM", f"{rom}°")
-
-    if contra > 0:
-        st.metric("Contralateral Angle", f"{contra}°")
-    else:
-        st.caption("Contralateral: Standby")
-
-
-# ================================================================
-# GAIT TELEMETRY
-# ================================================================
-
-def _render_gait_telemetry_native(
-    telemetry: Dict[str, Any],
-):
-
-    quality = telemetry.get("tracking_quality", "POOR")
-
-    left_knee = telemetry.get("left_knee_angle", 0.0)
-    right_knee = telemetry.get("right_knee_angle", 0.0)
-    steps = telemetry.get("step_count_estimate", 0)
-    duration = telemetry.get("session_duration", 0.0)
-
-    st.subheader("Basic Gait Observation")
-
-    st.caption("Descriptive lower-limb kinematics")
-
-    if quality.upper() == "GOOD":
-        st.success(f"Tracking: {quality}")
-    elif quality.upper() == "FAIR":
-        st.warning(f"Tracking: {quality}")
-    else:
-        st.error(f"Tracking: {quality}")
-
-    c1, c2 = st.columns(2)
-
-    with c1:
-        st.metric("Left Knee", f"{left_knee}°")
-
-    with c2:
-        st.metric("Right Knee", f"{right_knee}°")
-
-    c1, c2 = st.columns(2)
-
-    with c1:
-        st.metric("Step Cycles", steps)
-
-    with c2:
-        st.metric("Duration", f"{duration:.1f}s")
